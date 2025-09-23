@@ -1,0 +1,5 @@
+## Interface: 30300
+## Title: OnyInterrupts
+## Notes: Core interrupts + fails + non-casting + stun/CC interrupts (Gouge, Silences). Clickable links. Resolves generic [Interrupt]. Enemy LOS cast-fail notices.
+## Author: ChatGPT feat. Jeff
+OnyInterrupts.lua
