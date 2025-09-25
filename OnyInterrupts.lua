@@ -3,8 +3,16 @@
 
 local f = CreateFrame("Frame")
 f:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
+f:RegisterEvent("PLAYER_ENTERING_WORLD")
 
 local band = bit.band
+local format = string.format
+local lower = string.lower
+local find = string.find
+local tostring = tostring
+local GetTime = GetTime
+local UnitGUID = UnitGUID
+local unpack = unpack
 local playerGUID
 
 -- Colors
@@ -35,13 +43,13 @@ local function isHostile(flags)  return band(flags or 0, REACTION_HOSTILE ) > 0 
 -- LOS matcher
 local function isLOSReason(reason)
   if not reason then return false end
-  local r = tostring(reason):lower()
-  if r:find("line of sight", 1, true) then return true end
+  local r = lower(tostring(reason))
+  if find(r, "line of sight", 1, true) then return true end
   if r == "los" then return true end
-  if r:find("obstruct", 1, true) then return true end -- some cores say "obstructed"
+  if find(r, "obstruct", 1, true) then return true end -- some cores say "obstructed"
   if SPELL_FAILED_LINE_OF_SIGHT then
-    local c = tostring(SPELL_FAILED_LINE_OF_SIGHT):lower()
-    if c ~= "" and r:find(c, 1, true) then return true end
+    local c = lower(tostring(SPELL_FAILED_LINE_OF_SIGHT))
+    if c ~= "" and find(r, c, 1, true) then return true end
   end
   return false
 end
@@ -133,16 +141,16 @@ local silenceNames  = {
 
 local function isStunLike(spellId, spellName)
   if spellId and stunSpells[spellId] then return true end
-  if spellName and stunNames[string.lower(spellName)] then return true end
+  if spellName and stunNames[lower(spellName)] then return true end
   return false
 end
 
 local function isSilenceLike(spellId, spellName)
   if spellId and silenceSpells[spellId] then return true end
   if spellName then
-    local n = string.lower(spellName)
+    local n = lower(spellName)
     if silenceNames[n] then return true end
-    if string.find(n, "silenc", 1, true) then return true end
+    if find(n, "silenc", 1, true) then return true end
   end
   return false
 end
@@ -155,7 +163,7 @@ local function linkOrName(spellId, spellName)
     if link then return link end
   end
   if spellName then
-    return string.format("|cff71d5ff[%s]|r", spellName)
+    return format("|cff71d5ff[%s]|r", spellName)
   end
   return "|cff71d5ff[Unknown Spell]|r"
 end
@@ -176,15 +184,35 @@ end
 -- Debounce: suppress "used on non-casting" right after a real interrupt/CC interrupt
 local suppressPair = {}  -- key -> expiry
 local SUPPRESS_WIN = 1.5
-local function markSuppressed(srcGUID, dstGUID)
-  suppressPair[ mkKey(srcGUID, dstGUID) ] = GetTime() + SUPPRESS_WIN
+local function markSuppressed(srcGUID, dstGUID, now)
+  suppressPair[ mkKey(srcGUID, dstGUID) ] = (now or GetTime()) + SUPPRESS_WIN
 end
-local function isSuppressed(srcGUID, dstGUID)
+local function isSuppressed(srcGUID, dstGUID, now)
   local t = suppressPair[ mkKey(srcGUID, dstGUID) ]
-  return t and GetTime() <= t
+  return t and (now or GetTime()) <= t
 end
 
+local function resetState()
+  for k in pairs(castingUntil) do castingUntil[k] = nil end
+  for k in pairs(lastCastName) do lastCastName[k] = nil end
+  for k in pairs(lastCastId) do lastCastId[k] = nil end
+  for k in pairs(recentAbility) do recentAbility[k] = nil end
+  for k in pairs(suppressPair) do suppressPair[k] = nil end
+end
+
+local auraAppliedEvents = {
+  SPELL_AURA_APPLIED = true,
+  SPELL_AURA_REFRESH = true,
+}
+
 f:SetScript("OnEvent", function(self, event, ...)
+  if event ~= "COMBAT_LOG_EVENT_UNFILTERED" then
+    if event == "PLAYER_ENTERING_WORLD" then
+      playerGUID = UnitGUID("player")
+      resetState()
+    end
+    return
+  end
   local timestamp, subevent,
         srcGUID, srcName, srcFlags,
         dstGUID, dstName, dstFlags,
@@ -205,16 +233,16 @@ f:SetScript("OnEvent", function(self, event, ...)
     if interruptSpells[spellId] then
       storeRecent("interrupt", srcGUID, dstGUID, spellId, spellName, now)
       -- If the pair is in suppression window (an interrupt just registered), skip non-cast warning entirely
-      if isSuppressed(srcGUID, dstGUID) then return end
+      if isSuppressed(srcGUID, dstGUID, now) then return end
       local targetCasting = isCasting(dstGUID, now)
       if not targetCasting then
         local who, target = srcName or "Someone", dstName or "target"
         local srcTag, dstTag = typeLabel(srcFlags), typeLabel(dstFlags)
         local usedLink = linkOrName(spellId, spellName)
         if srcGUID == playerGUID then
-          msg(string.format("You used %s on %s%s while not casting", usedLink, target, dstTag), unpack(CLR_NONCAST))
+          msg(format("You used %s on %s%s while not casting", usedLink, target, dstTag), unpack(CLR_NONCAST))
         else
-          msg(string.format("%s%s used %s on %s%s while not casting", who, srcTag, usedLink, target, dstTag), unpack(CLR_NONCAST))
+          msg(format("%s%s used %s on %s%s while not casting", who, srcTag, usedLink, target, dstTag), unpack(CLR_NONCAST))
         end
       end
       return
@@ -231,7 +259,7 @@ f:SetScript("OnEvent", function(self, event, ...)
       local srcTag  = typeLabel(srcFlags)
       local dstTag  = typeLabel(dstFlags)
       local castLink= linkOrName(spellId, spellName)
-      msg(string.format("%s%s %s failed (line of sight on %s%s)", caster, srcTag, castLink, target, dstTag), unpack(CLR_LOS))
+      msg(format("%s%s %s failed (line of sight on %s%s)", caster, srcTag, castLink, target, dstTag), unpack(CLR_LOS))
       clearCasting(srcGUID); return
     end
     clearCasting(srcGUID)
@@ -240,7 +268,7 @@ f:SetScript("OnEvent", function(self, event, ...)
   end
 
   -- Also store CC on aura application
-  if subevent == "SPELL_AURA_APPLIED" and isCCLike(spellId, spellName) then
+  if auraAppliedEvents[subevent] and isCCLike(spellId, spellName) then
     storeRecent("cc", srcGUID, dstGUID, spellId, spellName, now)
   end
 
@@ -259,11 +287,11 @@ f:SetScript("OnEvent", function(self, event, ...)
     local srcTag, dstTag = typeLabel(srcFlags), typeLabel(dstFlags)
 
     if srcGUID == playerGUID then
-      msg(string.format("You interrupted %s on %s%s with %s", stoppedLink, target, dstTag, usedLink), unpack(CLR_SELF_SUCCESS))
+      msg(format("You interrupted %s on %s%s with %s", stoppedLink, target, dstTag, usedLink), unpack(CLR_SELF_SUCCESS))
     else
-      msg(string.format("%s%s interrupted %s on %s%s with %s", who, srcTag, stoppedLink, target, dstTag, usedLink), unpack(CLR_OTHER_SUCCESS))
+      msg(format("%s%s interrupted %s on %s%s with %s", who, srcTag, stoppedLink, target, dstTag, usedLink), unpack(CLR_OTHER_SUCCESS))
     end
-    markSuppressed(srcGUID, dstGUID)  -- suppress the immediate non-cast warning on the follow-up CAST_SUCCESS
+    markSuppressed(srcGUID, dstGUID, now)  -- suppress the immediate non-cast warning on the follow-up CAST_SUCCESS
     clearCasting(dstGUID); return
   end
 
@@ -277,22 +305,22 @@ f:SetScript("OnEvent", function(self, event, ...)
 
     if srcGUID == playerGUID then
       if targetCasting then
-        msg(string.format("Your %s on %s%s %s", usedLink, target, dstTag, string.lower(missType)), unpack(CLR_FAIL))
+        msg(format("Your %s on %s%s %s", usedLink, target, dstTag, lower(missType)), unpack(CLR_FAIL))
       else
-        msg(string.format("Your %s on %s%s while not casting (%s)", usedLink, target, dstTag, string.lower(missType)), unpack(CLR_NONCAST))
+        msg(format("Your %s on %s%s while not casting (%s)", usedLink, target, dstTag, lower(missType)), unpack(CLR_NONCAST))
       end
     else
       if targetCasting then
-        msg(string.format("%s%s tried %s on %s%s but it %s", who, srcTag, usedLink, target, dstTag, string.lower(missType)), unpack(CLR_FAIL))
+        msg(format("%s%s tried %s on %s%s but it %s", who, srcTag, usedLink, target, dstTag, lower(missType)), unpack(CLR_FAIL))
       else
-        msg(string.format("%s%s used %s on %s%s while not casting (%s)", who, srcTag, usedLink, target, dstTag, string.lower(missType)), unpack(CLR_NONCAST))
+        msg(format("%s%s used %s on %s%s while not casting (%s)", who, srcTag, usedLink, target, dstTag, lower(missType)), unpack(CLR_NONCAST))
       end
     end
     return
   end
 
   -- --------- CC LANDS WHILE TARGET IS CASTING (TREAT AS INTERRUPT) ---------
-  if subevent == "SPELL_AURA_APPLIED" and isCCLike(spellId, spellName) then
+  if auraAppliedEvents[subevent] and isCCLike(spellId, spellName) then
     local who, target = srcName or "Someone", dstName or "target"
     local srcTag, dstTag = typeLabel(srcFlags), typeLabel(dstFlags)
     local targetCasting = isCasting(dstGUID, now)
@@ -302,11 +330,11 @@ f:SetScript("OnEvent", function(self, event, ...)
       local ccLink   = linkOrName(spellId, spellName)
       local verb = isSilenceLike(spellId, spellName) and "silenced" or (isStunLike(spellId, spellName) and "stunned" or "CC'd")
       if srcGUID == playerGUID then
-        msg(string.format("You %s %s%s with %s (interrupted %s)", verb, target, dstTag, ccLink, castLink), unpack(CLR_STUN_INT))
+        msg(format("You %s %s%s with %s (interrupted %s)", verb, target, dstTag, ccLink, castLink), unpack(CLR_STUN_INT))
       else
-        msg(string.format("%s%s %s %s%s with %s (interrupted %s)", who, srcTag, verb, target, dstTag, ccLink, castLink), unpack(CLR_STUN_INT))
+        msg(format("%s%s %s %s%s with %s (interrupted %s)", who, srcTag, verb, target, dstTag, ccLink, castLink), unpack(CLR_STUN_INT))
       end
-      markSuppressed(srcGUID, dstGUID) -- also suppress non-cast warning for CC-based interrupts
+      markSuppressed(srcGUID, dstGUID, now) -- also suppress non-cast warning for CC-based interrupts
       clearCasting(dstGUID); return
     end
   end
