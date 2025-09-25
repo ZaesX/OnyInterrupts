@@ -1,5 +1,5 @@
 ## Interface: 30300
 ## Title: OnyInterrupts
 ## Notes: Interrupts + fails + non-casting + CC/silence interrupts; clickable links; LOS (enemy) fails; generic [Interrupt] fix. Debounces duplicate 'used while not casting' after a real interrupt.
-## Author: ChatGPT feat. Jeff
+## Author: ChatGPT feat. Zaes
 OnyInterrupts.lua
