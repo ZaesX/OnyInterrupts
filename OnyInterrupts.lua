@@ -1,8 +1,5 @@
--- OnyInterrupts: WotLK (3.3.5) interrupt & CC watcher with clickable spell links
--- Reviewed build:
---  - Fix: format() arg missing in "others used interrupt on non-casting and missed" branch
---  - LOS matcher: includes "obstruct" token
---  - Keeps previous features (Gouge, Silence family, enemy LOS fails, generic [Interrupt] substitution)
+-- OnyInterrupts (WotLK 3.3.5) — Interrupt/CC watcher with clickable links
+-- New: debounce "used while not casting" if a real interrupt/CC interrupt just landed for the same src->dst.
 
 local f = CreateFrame("Frame")
 f:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
@@ -35,7 +32,7 @@ end
 local REACTION_HOSTILE  = COMBATLOG_OBJECT_REACTION_HOSTILE  or 0x00000040
 local function isHostile(flags)  return band(flags or 0, REACTION_HOSTILE ) > 0 end
 
--- Identify LOS reason strings
+-- LOS matcher
 local function isLOSReason(reason)
   if not reason then return false end
   local r = tostring(reason):lower()
@@ -78,7 +75,7 @@ local function getLastCast(casterGUID)
   return lastCastId[casterGUID], lastCastName[casterGUID]
 end
 
--- Core interrupt abilities (exclude Earth Shock / Arcane Torrent)
+-- Known interrupts (no Earth Shock/Arcane Torrent spam)
 local interruptSpells = {
   [1766]  = "Kick",          -- Rogue
   [6552]  = "Pummel",        -- Warrior
@@ -163,7 +160,7 @@ local function linkOrName(spellId, spellName)
   return "|cff71d5ff[Unknown Spell]|r"
 end
 
--- Store recent ability per src->dst for substitution when core says "Interrupt"
+-- Recent ability memory for generic "Interrupt" substitution
 local recentAbility = {}  -- key = srcGUID..":"..dstGUID -> {id=spellId, name=spellName, t=GetTime(), kind="interrupt"|"cc"}
 local WINDOW = 2.0
 
@@ -176,13 +173,18 @@ local function getRecent(srcGUID, dstGUID, now, maxAge)
   if v and ((now or GetTime()) - v.t) <= (maxAge or WINDOW) then return v.id, v.name, v.kind end
 end
 
+-- Debounce: suppress "used on non-casting" right after a real interrupt/CC interrupt
+local suppressPair = {}  -- key -> expiry
+local SUPPRESS_WIN = 1.5
+local function markSuppressed(srcGUID, dstGUID)
+  suppressPair[ mkKey(srcGUID, dstGUID) ] = GetTime() + SUPPRESS_WIN
+end
+local function isSuppressed(srcGUID, dstGUID)
+  local t = suppressPair[ mkKey(srcGUID, dstGUID) ]
+  return t and GetTime() <= t
+end
+
 f:SetScript("OnEvent", function(self, event, ...)
-  -- Using your core's arg order (no hideCaster/raid flags):
-  -- 1 timestamp, 2 subevent,
-  -- 3 srcGUID, 4 srcName, 5 srcFlags,
-  -- 6 dstGUID, 7 dstName, 8 dstFlags,
-  -- 9 spellId, 10 spellName, 11 spellSchool,
-  -- 12+ extras
   local timestamp, subevent,
         srcGUID, srcName, srcFlags,
         dstGUID, dstName, dstFlags,
@@ -202,6 +204,20 @@ f:SetScript("OnEvent", function(self, event, ...)
   elseif subevent == "SPELL_CAST_SUCCESS" then
     if interruptSpells[spellId] then
       storeRecent("interrupt", srcGUID, dstGUID, spellId, spellName, now)
+      -- If the pair is in suppression window (an interrupt just registered), skip non-cast warning entirely
+      if isSuppressed(srcGUID, dstGUID) then return end
+      local targetCasting = isCasting(dstGUID, now)
+      if not targetCasting then
+        local who, target = srcName or "Someone", dstName or "target"
+        local srcTag, dstTag = typeLabel(srcFlags), typeLabel(dstFlags)
+        local usedLink = linkOrName(spellId, spellName)
+        if srcGUID == playerGUID then
+          msg(string.format("You used %s on %s%s while not casting", usedLink, target, dstTag), unpack(CLR_NONCAST))
+        else
+          msg(string.format("%s%s used %s on %s%s while not casting", who, srcTag, usedLink, target, dstTag), unpack(CLR_NONCAST))
+        end
+      end
+      return
     elseif isCCLike(spellId, spellName) then
       storeRecent("cc", srcGUID, dstGUID, spellId, spellName, now)
     else
@@ -223,7 +239,7 @@ f:SetScript("OnEvent", function(self, event, ...)
     clearCasting(dstGUID); return
   end
 
-  -- Also store CC on aura application, in case core doesn't fire CAST_SUCCESS
+  -- Also store CC on aura application
   if subevent == "SPELL_AURA_APPLIED" and isCCLike(spellId, spellName) then
     storeRecent("cc", srcGUID, dstGUID, spellId, spellName, now)
   end
@@ -247,6 +263,7 @@ f:SetScript("OnEvent", function(self, event, ...)
     else
       msg(string.format("%s%s interrupted %s on %s%s with %s", who, srcTag, stoppedLink, target, dstTag, usedLink), unpack(CLR_OTHER_SUCCESS))
     end
+    markSuppressed(srcGUID, dstGUID)  -- suppress the immediate non-cast warning on the follow-up CAST_SUCCESS
     clearCasting(dstGUID); return
   end
 
@@ -274,24 +291,7 @@ f:SetScript("OnEvent", function(self, event, ...)
     return
   end
 
-  -- --------- INTERRUPT USED (POSSIBLY ON NON-CASTING TARGET) ---------
-  if subevent == "SPELL_CAST_SUCCESS" and interruptSpells[spellId] then
-    local who, target = srcName or "Someone", dstName or "target"
-    local srcTag, dstTag = typeLabel(srcFlags), typeLabel(dstFlags)
-    local targetCasting = isCasting(dstGUID, now)
-    local usedLink = linkOrName(spellId, spellName)
-
-    if not targetCasting then
-      if srcGUID == playerGUID then
-        msg(string.format("You used %s on %s%s while not casting", usedLink, target, dstTag), unpack(CLR_NONCAST))
-      else
-        msg(string.format("%s%s used %s on %s%s while not casting", who, srcTag, usedLink, target, dstTag), unpack(CLR_NONCAST))
-      end
-    end
-    return
-  end
-
-  -- --------- CC (STUN/SILENCE) LANDS WHILE TARGET IS CASTING (TREAT AS INTERRUPT) ---------
+  -- --------- CC LANDS WHILE TARGET IS CASTING (TREAT AS INTERRUPT) ---------
   if subevent == "SPELL_AURA_APPLIED" and isCCLike(spellId, spellName) then
     local who, target = srcName or "Someone", dstName or "target"
     local srcTag, dstTag = typeLabel(srcFlags), typeLabel(dstFlags)
@@ -306,6 +306,7 @@ f:SetScript("OnEvent", function(self, event, ...)
       else
         msg(string.format("%s%s %s %s%s with %s (interrupted %s)", who, srcTag, verb, target, dstTag, ccLink, castLink), unpack(CLR_STUN_INT))
       end
+      markSuppressed(srcGUID, dstGUID) -- also suppress non-cast warning for CC-based interrupts
       clearCasting(dstGUID); return
     end
   end
