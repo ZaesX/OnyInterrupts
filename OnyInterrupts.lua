@@ -4,6 +4,7 @@
 local f = CreateFrame("Frame")
 f:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
 f:RegisterEvent("PLAYER_ENTERING_WORLD")
+f:RegisterEvent("PLAYER_LOGIN")
 
 local band = bit.band
 local format = string.format
@@ -25,6 +26,116 @@ local CLR_LOS          = {0.95, 0.50, 1.00}  -- magenta for LOS
 
 local function msg(text, r, g, b)
   (DEFAULT_CHAT_FRAME or ChatFrame1):AddMessage(text, r or 1, g or 1, b or 1)
+end
+
+-- Configuration
+local MODE_ALL      = "all"
+local MODE_SELF     = "self"
+local MODE_MINIMAL  = "minimal"
+
+local MODE_LABELS = {
+  [MODE_ALL]     = "all events",
+  [MODE_SELF]    = "only your events",
+  [MODE_MINIMAL] = "only your successful interrupts",
+}
+
+local db
+
+local function ensureDB()
+  if type(OnyInterruptsDB) ~= "table" then
+    OnyInterruptsDB = {}
+  end
+  db = OnyInterruptsDB
+  local mode = db.mode
+  if mode ~= MODE_ALL and mode ~= MODE_SELF and mode ~= MODE_MINIMAL then
+    db.mode = MODE_ALL
+  end
+  return db
+end
+
+local function currentMode()
+  if not db then ensureDB() end
+  return db.mode or MODE_ALL
+end
+
+local function shouldShow(kind, srcGUID)
+  local mode = currentMode()
+  if mode == MODE_ALL then return true end
+
+  if srcGUID and srcGUID == playerGUID then
+    if mode == MODE_SELF then return true end
+    if mode == MODE_MINIMAL then
+      return kind == "interrupt_success" or kind == "cc_interrupt"
+    end
+  end
+
+  return false
+end
+
+local function notify(kind, srcGUID, text, r, g, b)
+  if shouldShow(kind, srcGUID) then
+    msg(text, r, g, b)
+  end
+end
+
+local addonPrefix = "|cffffd100OnyInterrupts|r"
+
+local function inform(text)
+  msg(format("%s: %s", addonPrefix, text), 1, 0.9, 0.1)
+end
+
+local function trim(str)
+  if not str then return "" end
+  return str:match("^%s*(.-)%s*$") or ""
+end
+
+local function describeMode(mode)
+  local label = MODE_LABELS[mode]
+  if label then
+    return format("%s (%s)", mode, label)
+  end
+  return mode or MODE_ALL
+end
+
+local function setMode(mode)
+  ensureDB()
+  if db.mode == mode then
+    inform(format("Verbosity already set to %s.", describeMode(mode)))
+    return
+  end
+  db.mode = mode
+  inform(format("Verbosity set to %s.", describeMode(mode)))
+end
+
+local function printStatus()
+  inform(format("Current verbosity: %s.", describeMode(currentMode())))
+  inform("Use /onyints all, /onyints self, or /onyints minimal.")
+end
+
+SLASH_ONYINTS1 = "/onyints"
+SLASH_ONYINTS2 = "/onyinterrupts"
+
+SlashCmdList.ONYINTS = function(msg)
+  local input = lower(trim(msg))
+  if input == "" or input == "status" or input == "help" then
+    printStatus()
+    return
+  end
+
+  local normalized
+  if input == "all" or input == "full" or input == "default" then
+    normalized = MODE_ALL
+  elseif input == "self" or input == "mine" or input == "me" then
+    normalized = MODE_SELF
+  elseif input == "minimal" or input == "quiet" or input == "silent" then
+    normalized = MODE_MINIMAL
+  end
+
+  if normalized then
+    setMode(normalized)
+  else
+    printStatus()
+  end
 end
 
 local function typeLabel(flags)
@@ -210,6 +321,8 @@ f:SetScript("OnEvent", function(self, event, ...)
     if event == "PLAYER_ENTERING_WORLD" then
       playerGUID = UnitGUID("player")
       resetState()
+    elseif event == "PLAYER_LOGIN" then
+      ensureDB()
     end
     return
   end
@@ -239,11 +352,13 @@ f:SetScript("OnEvent", function(self, event, ...)
         local who, target = srcName or "Someone", dstName or "target"
         local srcTag, dstTag = typeLabel(srcFlags), typeLabel(dstFlags)
         local usedLink = linkOrName(spellId, spellName)
+        local text
         if srcGUID == playerGUID then
-          msg(format("You used %s on %s%s while not casting", usedLink, target, dstTag), unpack(CLR_NONCAST))
+          text = format("You used %s on %s%s while not casting", usedLink, target, dstTag)
         else
-          msg(format("%s%s used %s on %s%s while not casting", who, srcTag, usedLink, target, dstTag), unpack(CLR_NONCAST))
+          text = format("%s%s used %s on %s%s while not casting", who, srcTag, usedLink, target, dstTag)
         end
+        notify("noncast", srcGUID, text, unpack(CLR_NONCAST))
       end
       return
     elseif isCCLike(spellId, spellName) then
@@ -259,7 +374,7 @@ f:SetScript("OnEvent", function(self, event, ...)
       local srcTag  = typeLabel(srcFlags)
       local dstTag  = typeLabel(dstFlags)
       local castLink= linkOrName(spellId, spellName)
-      msg(format("%s%s %s failed (line of sight on %s%s)", caster, srcTag, castLink, target, dstTag), unpack(CLR_LOS))
+      notify("los", srcGUID, format("%s%s %s failed (line of sight on %s%s)", caster, srcTag, castLink, target, dstTag), unpack(CLR_LOS))
       clearCasting(srcGUID); return
     end
     clearCasting(srcGUID)
@@ -286,11 +401,14 @@ f:SetScript("OnEvent", function(self, event, ...)
     local usedLink, stoppedLink = linkOrName(usedId, usedName), linkOrName(stoppedId, stoppedName)
     local srcTag, dstTag = typeLabel(srcFlags), typeLabel(dstFlags)
 
+    local text
     if srcGUID == playerGUID then
-      msg(format("You interrupted %s on %s%s with %s", stoppedLink, target, dstTag, usedLink), unpack(CLR_SELF_SUCCESS))
+      text = format("You interrupted %s on %s%s with %s", stoppedLink, target, dstTag, usedLink)
     else
-      msg(format("%s%s interrupted %s on %s%s with %s", who, srcTag, stoppedLink, target, dstTag, usedLink), unpack(CLR_OTHER_SUCCESS))
+      text = format("%s%s interrupted %s on %s%s with %s", who, srcTag, stoppedLink, target, dstTag, usedLink)
     end
+    local color = srcGUID == playerGUID and CLR_SELF_SUCCESS or CLR_OTHER_SUCCESS
+    notify("interrupt_success", srcGUID, text, unpack(color))
     markSuppressed(srcGUID, dstGUID, now)  -- suppress the immediate non-cast warning on the follow-up CAST_SUCCESS
     clearCasting(dstGUID); return
   end
@@ -303,19 +421,25 @@ f:SetScript("OnEvent", function(self, event, ...)
     local usedLink = linkOrName(spellId, spellName)
     local targetCasting = isCasting(dstGUID, now)
 
+    local text, color, kind
     if srcGUID == playerGUID then
       if targetCasting then
-        msg(format("Your %s on %s%s %s", usedLink, target, dstTag, lower(missType)), unpack(CLR_FAIL))
+        text = format("Your %s on %s%s %s", usedLink, target, dstTag, lower(missType))
+        color, kind = CLR_FAIL, "interrupt_fail"
       else
-        msg(format("Your %s on %s%s while not casting (%s)", usedLink, target, dstTag, lower(missType)), unpack(CLR_NONCAST))
+        text = format("Your %s on %s%s while not casting (%s)", usedLink, target, dstTag, lower(missType))
+        color, kind = CLR_NONCAST, "noncast"
       end
     else
       if targetCasting then
-        msg(format("%s%s tried %s on %s%s but it %s", who, srcTag, usedLink, target, dstTag, lower(missType)), unpack(CLR_FAIL))
+        text = format("%s%s tried %s on %s%s but it %s", who, srcTag, usedLink, target, dstTag, lower(missType))
+        color, kind = CLR_FAIL, "interrupt_fail"
       else
-        msg(format("%s%s used %s on %s%s while not casting (%s)", who, srcTag, usedLink, target, dstTag, lower(missType)), unpack(CLR_NONCAST))
+        text = format("%s%s used %s on %s%s while not casting (%s)", who, srcTag, usedLink, target, dstTag, lower(missType))
+        color, kind = CLR_NONCAST, "noncast"
       end
     end
+    notify(kind, srcGUID, text, unpack(color))
     return
   end
 
@@ -329,11 +453,13 @@ f:SetScript("OnEvent", function(self, event, ...)
       local castLink = linkOrName(castId, castName or "a spell")
       local ccLink   = linkOrName(spellId, spellName)
       local verb = isSilenceLike(spellId, spellName) and "silenced" or (isStunLike(spellId, spellName) and "stunned" or "CC'd")
+      local text
       if srcGUID == playerGUID then
-        msg(format("You %s %s%s with %s (interrupted %s)", verb, target, dstTag, ccLink, castLink), unpack(CLR_STUN_INT))
+        text = format("You %s %s%s with %s (interrupted %s)", verb, target, dstTag, ccLink, castLink)
       else
-        msg(format("%s%s %s %s%s with %s (interrupted %s)", who, srcTag, verb, target, dstTag, ccLink, castLink), unpack(CLR_STUN_INT))
+        text = format("%s%s %s %s%s with %s (interrupted %s)", who, srcTag, verb, target, dstTag, ccLink, castLink)
       end
+      notify("cc_interrupt", srcGUID, text, unpack(CLR_STUN_INT))
       markSuppressed(srcGUID, dstGUID, now) -- also suppress non-cast warning for CC-based interrupts
       clearCasting(dstGUID); return
     end
