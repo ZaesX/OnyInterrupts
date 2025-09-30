@@ -65,7 +65,7 @@ local function shouldShow(kind, srcGUID)
   if srcGUID and srcGUID == playerGUID then
     if mode == MODE_SELF then return true end
     if mode == MODE_MINIMAL then
-      return kind == "interrupt_success" or kind == "cc_interrupt"
+      return kind == "interrupt_success" or kind == "cc_interrupt" or kind == "los_denial"
     end
   end
 
@@ -149,7 +149,9 @@ end
 
 -- Hostility helper
 local REACTION_HOSTILE  = COMBATLOG_OBJECT_REACTION_HOSTILE  or 0x00000040
+local REACTION_FRIENDLY = COMBATLOG_OBJECT_REACTION_FRIENDLY or 0x00000010
 local function isHostile(flags)  return band(flags or 0, REACTION_HOSTILE ) > 0 end
+local function isFriendly(flags) return band(flags or 0, REACTION_FRIENDLY) > 0 end
 
 -- LOS matcher
 local function isLOSReason(reason)
@@ -367,14 +369,35 @@ f:SetScript("OnEvent", function(self, event, ...)
       clearCasting(srcGUID)
     end
   elseif subevent == "SPELL_CAST_FAILED" then
-    -- Only enemy LOS cast-fails are reported (team moved out of LOS)
-    if isHostile(srcFlags) and isLOSReason(arg12) then
-      local caster  = srcName or "Enemy"
-      local target  = dstName or "ally"
-      local srcTag  = typeLabel(srcFlags)
-      local dstTag  = typeLabel(dstFlags)
-      local castLink= linkOrName(spellId, spellName)
-      notify("los", srcGUID, format("%s%s %s failed (line of sight on %s%s)", caster, srcTag, castLink, target, dstTag), unpack(CLR_LOS))
+    local los = isLOSReason(arg12)
+    local tracked = interruptSpells[spellId] or isCCLike(spellId, spellName)
+    local hostile = isHostile(srcFlags)
+    if los and (tracked or hostile) then
+      local caster   = srcName or (hostile and "Enemy" or "Someone")
+      local target   = dstName or "target"
+      local srcTag   = typeLabel(srcFlags)
+      local dstTag   = typeLabel(dstFlags)
+      local castLink = linkOrName(spellId, spellName)
+      local text
+      if hostile and dstGUID and (dstGUID == playerGUID or isFriendly(dstFlags)) then
+        if dstGUID == playerGUID then
+          text = format("You broke line of sight on %s%s's %s", caster, srcTag, castLink)
+          notify("los_denial", dstGUID, text, unpack(CLR_SELF_SUCCESS))
+        else
+          local breaker = target
+          text = format("%s%s broke line of sight on %s%s's %s", breaker, dstTag, caster, srcTag, castLink)
+          notify("los", dstGUID, text, unpack(CLR_OTHER_SUCCESS))
+        end
+      else
+        if srcGUID == playerGUID then
+          text = format("Your %s on %s%s failed (line of sight)", castLink, target, dstTag)
+        elseif hostile then
+          text = format("%s%s %s failed (line of sight on %s%s)", caster, srcTag, castLink, target, dstTag)
+        else
+          text = format("%s%s %s on %s%s failed (line of sight)", caster, srcTag, castLink, target, dstTag)
+        end
+        notify("los", srcGUID, text, unpack(CLR_LOS))
+      end
       clearCasting(srcGUID); return
     end
     clearCasting(srcGUID)
