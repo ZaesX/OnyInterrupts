@@ -16,13 +16,13 @@ local UnitGUID = UnitGUID
 local unpack = unpack
 local playerGUID
 
--- Colors
-local CLR_SELF_SUCCESS = {1.00, 0.90, 0.10}  -- bright gold
-local CLR_OTHER_SUCCESS= {0.30, 0.85, 1.00}  -- cyan
-local CLR_FAIL         = {1.00, 0.30, 0.30}  -- red
-local CLR_NONCAST      = {1.00, 0.65, 0.25}  -- orange
-local CLR_STUN_INT     = {0.85, 0.70, 1.00}  -- lavender
-local CLR_LOS          = {0.95, 0.50, 1.00}  -- magenta for LOS
+-- Use high-contrast colors so OnyInterrupts stands apart from party chat hues.
+local CLR_SELF_SUCCESS = {0.30, 1.00, 0.30}  -- vivid green for your interrupts
+local CLR_OTHER_SUCCESS= {0.15, 0.75, 1.00}  -- bright teal for others
+local CLR_FAIL         = {1.00, 0.20, 0.20}  -- intense red for failures
+local CLR_NONCAST      = {1.00, 0.55, 0.10}  -- rich amber for "not casting"
+local CLR_STUN_INT     = {0.75, 0.35, 1.00}  -- bold violet for stun/silence
+local CLR_LOS          = {1.00, 0.35, 0.65}  -- hot pink for line-of-sight
 
 local function msg(text, r, g, b)
   (DEFAULT_CHAT_FRAME or ChatFrame1):AddMessage(text, r or 1, g or 1, b or 1)
